@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>URL → Google Drive</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #222; }
+    h1 { font-size: 1.5rem; }
+    label { display: block; margin-top: 12px; font-weight: 600; }
+    input { width: 100%; padding: 8px; box-sizing: border-box; margin-top: 4px; }
+    button { margin-top: 16px; padding: 10px 20px; cursor: pointer; }
+    .job { border: 1px solid #ddd; border-radius: 6px; padding: 10px; margin-top: 12px; word-break: break-all; }
+    progress { width: 100%; }
+    .err { color: #c00; } .ok { color: #070; }
+  </style>
+</head>
+<body>
+  <h1>Tải file từ link → Google Drive</h1>
+  <form id="f">
+    <label>URL file <input name="url" type="url" required placeholder="https://example.com/file.zip" /></label>
+    <label>Tên file (tùy chọn) <input name="name" /></label>
+    <label>ID thư mục Drive (tùy chọn) <input name="folderId" /></label>
+    <label>API key (nếu server có đặt) <input name="apiKey" type="password" /></label>
+    <button>Upload</button>
+  </form>
+  <div id="jobs"></div>
+  <script>
+    const f = document.getElementById('f');
+    f.apiKey.value = localStorage.getItem('apiKey') || '';
+    const mb = (b) => (b / 1048576).toFixed(2) + ' MB';
+
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const apiKey = f.apiKey.value.trim();
+      localStorage.setItem('apiKey', apiKey);
+      const headers = { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: 'Bearer ' + apiKey } : {}) };
+      const body = { url: f.url.value.trim(), name: f.name.value.trim() || undefined, folderId: f.folderId.value.trim() || undefined };
+
+      const el = document.createElement('div');
+      el.className = 'job';
+      el.textContent = 'Đang gửi: ' + body.url;
+      document.getElementById('jobs').prepend(el);
+
+      const r = await fetch('/api/upload', { method: 'POST', headers, body: JSON.stringify(body) });
+      const d = await r.json();
+      if (!r.ok) { el.innerHTML = `<span class="err">❌ ${d.error}</span>`; return; }
+
+      const poll = setInterval(async () => {
+        const j = await (await fetch(d.statusUrl, { headers })).json();
+        const pct = j.total ? (j.loaded / j.total) * 100 : null;
+        if (j.status === 'running') {
+          el.innerHTML = `${body.url}<br>${mb(j.loaded)}${j.total ? ' / ' + mb(j.total) : ''}
+            <progress ${pct !== null ? `value="${pct}" max="100"` : ''}></progress>`;
+        } else {
+          clearInterval(poll);
+          el.innerHTML = j.status === 'done'
+            ? `<span class="ok">✅ ${j.file.name}</span> — <a href="${j.file.webViewLink}" target="_blank">Mở trên Drive</a>`
+            : `<span class="err">❌ ${j.error}</span><br>${body.url}`;
+        }
+      }, 1000);
+    });
+  </script>
+</body>
+</html>

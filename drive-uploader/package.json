@@ -1,0 +1,24 @@
+{
+  "name": "drive-uploader",
+  "version": "1.0.0",
+  "description": "Tải file từ URL và upload thẳng lên Google Drive (stream, không lưu đĩa)",
+  "type": "module",
+  "main": "src/server.js",
+  "bin": {
+    "drive-upload": "src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "upload": "node src/cli.js",
+    "auth": "node src/auth.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^5.3.0",
+    "googleapis": "^189.0.0"
+  }
+}
