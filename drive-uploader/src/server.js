@@ -3,12 +3,15 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { uploadFromUrl, getDriveClient, validateUrl } from './drive.js';
+import { closeBrowser } from './browser.js';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
 const API_KEY = process.env.API_KEY;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+app.set('trust proxy', 'loopback');
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
@@ -33,21 +36,30 @@ try {
 
 // Tạo job tải + upload, trả về ngay jobId
 app.post('/api/upload', (req, res) => {
-  const { url, name, folderId } = req.body ?? {};
+  const { url, name, folderId, headers, browser } = req.body ?? {};
   try {
     validateUrl(url);
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
+  if (browser && !['auto', 'always', 'never'].includes(browser)) {
+    return res.status(400).json({ error: 'browser phải là auto, always hoặc never' });
+  }
+  if (headers && (typeof headers !== 'object' || Object.values(headers).some((v) => typeof v !== 'string'))) {
+    return res.status(400).json({ error: 'headers phải là object {tên: giá trị}' });
+  }
 
   const id = randomUUID();
-  const job = { id, url, status: 'running', loaded: 0, total: null, file: null, error: null, createdAt: Date.now() };
+  const job = { id, url, status: 'running', phase: 'queued', loaded: 0, total: null, file: null, error: null, createdAt: Date.now() };
   jobs.set(id, job);
 
   uploadFromUrl(url, {
     drive,
     name,
     folderId,
+    headers,
+    browser,
+    onStatus: (phase) => (job.phase = phase),
     onProgress: ({ loaded, total }) => Object.assign(job, { loaded, total }),
   })
     .then((file) => Object.assign(job, { status: 'done', file }))
@@ -64,4 +76,13 @@ app.get('/api/jobs/:id', (req, res) => {
   res.json(job);
 });
 
-app.listen(PORT, () => console.log(`🚀 Server chạy tại http://localhost:${PORT}`));
+const server = app.listen(PORT, HOST, () => console.log(`🚀 Server chạy tại http://${HOST}:${PORT}`));
+
+async function shutdown() {
+  console.log('Đang tắt server...');
+  server.close();
+  await closeBrowser();
+  process.exit(0);
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

@@ -1,7 +1,7 @@
 {
   "name": "drive-uploader",
   "version": "1.0.0",
-  "description": "Tải file từ URL và upload thẳng lên Google Drive (stream, không lưu đĩa)",
+  "description": "Tải file từ URL (kể cả link có Cloudflare) và upload lên Google Drive",
   "type": "module",
   "main": "src/server.js",
   "bin": {
@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node src/server.js",
     "upload": "node src/cli.js",
-    "auth": "node src/auth.js"
+    "auth": "node src/auth.js",
+    "start:xvfb": "xvfb-run -a --server-args=\"-screen 0 1280x800x24\" node src/server.js"
   },
   "engines": {
     "node": ">=18"
@@ -19,6 +20,7 @@
   "dependencies": {
     "dotenv": "^17.4.2",
     "express": "^5.3.0",
-    "googleapis": "^189.0.0"
+    "googleapis": "^189.0.0",
+    "playwright": "1.63.0"
   }
 }

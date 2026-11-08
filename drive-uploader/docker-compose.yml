@@ -1,0 +1,25 @@
+services:
+  drive-uploader:
+    build: .
+    container_name: drive-uploader
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+    ports:
+      # Chỉ mở trên localhost của VPS; ra ngoài đi qua Nginx (HTTPS) hoặc SSH tunnel
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:6080:6080"
+    volumes:
+      - data:/app/data   # profile Chromium (giữ cookie Cloudflare)
+      - tmp:/app/tmp     # file tạm khi tải qua trình duyệt
+      # Nếu dùng Service Account, bỏ comment dòng dưới và đặt
+      # GOOGLE_APPLICATION_CREDENTIALS=/app/service-account.json trong .env
+      # - ./service-account.json:/app/service-account.json:ro
+    shm_size: "1gb"      # Chromium cần /dev/shm đủ lớn
+    init: true
+
+volumes:
+  data:
+  tmp:

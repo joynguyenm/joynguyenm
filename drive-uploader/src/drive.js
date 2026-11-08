@@ -1,7 +1,10 @@
 import { Readable, Transform } from 'node:stream';
+import { createReadStream } from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { google } from 'googleapis';
 import 'dotenv/config';
+import { isCloudflareChallenge } from './browser.js';
 
 const SCOPES = ['https://www.googleapis.com/auth/drive.file'];
 
@@ -70,48 +73,124 @@ export function validateUrl(raw) {
   return u.toString();
 }
 
-/**
- * Tải file từ URL và stream thẳng lên Google Drive (không ghi ra đĩa).
- * @param {string} url
- * @param {object} [opts]
- * @param {string} [opts.name]      Tên file trên Drive (mặc định đoán từ URL/header)
- * @param {string} [opts.folderId]  ID thư mục Drive đích
- * @param {(p:{loaded:number,total:number|null})=>void} [opts.onProgress]
- * @param {AbortSignal} [opts.signal]
- * @returns {Promise<{id:string,name:string,mimeType:string,size:string,webViewLink:string}>}
- */
-export async function uploadFromUrl(url, opts = {}) {
-  const drive = opts.drive ?? getDriveClient();
-  const target = validateUrl(url);
+const MIME_BY_EXT = {
+  pdf: 'application/pdf', zip: 'application/zip', rar: 'application/vnd.rar', '7z': 'application/x-7z-compressed',
+  mp4: 'video/mp4', mkv: 'video/x-matroska', mp3: 'audio/mpeg', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+  png: 'image/png', gif: 'image/gif', txt: 'text/plain', apk: 'application/vnd.android.package-archive',
+};
+const mimeFromName = (n) => MIME_BY_EXT[path.extname(n).slice(1).toLowerCase()] || 'application/octet-stream';
 
-  const res = await fetch(target, { redirect: 'follow', signal: opts.signal });
-  if (!res.ok || !res.body) {
-    throw new Error(`Tải file thất bại: HTTP ${res.status} ${res.statusText}`);
-  }
-
-  const total = Number(res.headers.get('content-length')) || null;
-  const mimeType = (res.headers.get('content-type') || 'application/octet-stream').split(';')[0].trim();
-  const name = opts.name || guessFileName(res.url || target, res.headers.get('content-disposition'));
-  const folderId = opts.folderId || process.env.DRIVE_FOLDER_ID || undefined;
-
+/** Upload một stream lên Drive, có đếm tiến độ. */
+async function uploadStream(drive, { stream, name, mimeType, total, folderId, onProgress, signal }) {
   let loaded = 0;
   const counter = new Transform({
     transform(chunk, _enc, cb) {
       loaded += chunk.length;
-      opts.onProgress?.({ loaded, total });
+      onProgress?.({ loaded, total });
       cb(null, chunk);
     },
   });
-  const body = Readable.fromWeb(res.body).pipe(counter);
-
   const { data } = await drive.files.create(
     {
       requestBody: { name, mimeType, ...(folderId ? { parents: [folderId] } : {}) },
-      media: { mimeType, body },
+      media: { mimeType, body: stream.pipe(counter) },
       fields: 'id,name,mimeType,size,webViewLink',
       supportsAllDrives: true,
     },
-    { signal: opts.signal }
+    { signal }
   );
   return data;
+}
+
+/**
+ * Tải file từ URL và upload lên Google Drive.
+ * - Bình thường: stream thẳng từ nguồn lên Drive (không ghi đĩa).
+ * - Nếu gặp Cloudflare: mở bằng Chromium thật để qua xác thực, rồi upload.
+ *
+ * @param {string} url
+ * @param {object} [opts]
+ * @param {string} [opts.name]      Tên file trên Drive (mặc định đoán từ URL/header)
+ * @param {string} [opts.folderId]  ID thư mục Drive đích
+ * @param {Record<string,string>} [opts.headers]  Header thêm khi tải (Cookie, User-Agent, Referer...)
+ * @param {'auto'|'always'|'never'} [opts.browser]  Dùng trình duyệt: tự động khi gặp Cloudflare / luôn luôn / không bao giờ
+ * @param {(p:{loaded:number,total:number|null})=>void} [opts.onProgress]
+ * @param {(s:'downloading'|'cloudflare'|'uploading')=>void} [opts.onStatus]
+ * @param {AbortSignal} [opts.signal]
+ */
+export async function uploadFromUrl(url, opts = {}) {
+  const drive = opts.drive ?? getDriveClient();
+  const target = validateUrl(url);
+  const folderId = opts.folderId || process.env.DRIVE_FOLDER_ID || undefined;
+  const mode = opts.browser || process.env.BROWSER_MODE || 'auto';
+  const { onProgress, onStatus, signal } = opts;
+
+  let headers = { ...(opts.headers || {}) };
+  if (!Object.keys(headers).some((k) => k.toLowerCase() === 'user-agent')) {
+    headers['User-Agent'] =
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
+  }
+
+  let res = null;
+  if (mode !== 'always') {
+    onStatus?.('downloading');
+    res = await fetch(target, { headers, redirect: 'follow', signal });
+  }
+
+  const blocked = !res || isCloudflareChallenge(res.status, (k) => res.headers.get(k));
+  if (blocked && mode !== 'never') {
+    await res?.body?.cancel().catch(() => {});
+    const { openInBrowser } = await import('./browser.js');
+    const r = await openInBrowser(target, { onStatus, signal });
+
+    if (r.kind === 'file') {
+      try {
+        const { size } = await fs.stat(r.filePath);
+        // Chromium không hiểu tên file dạng filename*=UTF-8''... nên ưu tiên đọc lại từ header
+        const name =
+          opts.name || (r.contentDisposition ? guessFileName(r.url, r.contentDisposition) : sanitize(r.name));
+        let mimeType = (r.contentType || '').split(';')[0].trim();
+        if (!mimeType || mimeType === 'application/octet-stream') mimeType = mimeFromName(name);
+        onStatus?.('uploading');
+        return await uploadStream(drive, {
+          stream: createReadStream(r.filePath),
+          name,
+          mimeType,
+          total: size,
+          folderId,
+          onProgress,
+          signal,
+        });
+      } finally {
+        await r.cleanup();
+      }
+    }
+    // Tải lại bằng fetch với cookie Cloudflare vừa lấy được
+    headers = { ...headers, ...r.headers };
+    onStatus?.('downloading');
+    res = await fetch(target, { headers, redirect: 'follow', signal });
+    if (isCloudflareChallenge(res.status, (k) => res.headers.get(k))) {
+      throw new Error('Cloudflare vẫn chặn khi tải bằng cookie. Thử lại với browser="always".');
+    }
+  }
+
+  if (!res.ok || !res.body) {
+    if (blocked) throw new Error(`Bị Cloudflare chặn (HTTP ${res.status}). Bật chế độ trình duyệt (BROWSER_MODE=auto).`);
+    throw new Error(`Tải file thất bại: HTTP ${res.status} ${res.statusText}`);
+  }
+
+  const total = Number(res.headers.get('content-length')) || null;
+  const name = opts.name || guessFileName(res.url || target, res.headers.get('content-disposition'));
+  let mimeType = (res.headers.get('content-type') || '').split(';')[0].trim();
+  if (!mimeType || mimeType === 'application/octet-stream') mimeType = mimeFromName(name);
+
+  onStatus?.('uploading');
+  return uploadStream(drive, {
+    stream: Readable.fromWeb(res.body),
+    name,
+    mimeType,
+    total,
+    folderId,
+    onProgress,
+    signal,
+  });
 }
