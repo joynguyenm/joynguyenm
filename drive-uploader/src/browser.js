@@ -63,8 +63,10 @@ async function getContext() {
       // Xóa file khóa còn sót nếu lần trước Chromium bị tắt đột ngột (chỉ app này dùng profile)
       .then(() =>
         Promise.all(
-          ['SingletonLock', 'SingletonSocket', 'SingletonCookie'].map((f) =>
-            fs.rm(path.join(PROFILE_DIR, f), { force: true })
+          // Lịch sử tải về cũ (Default/History) làm Chromium crash khi tải file mới → xóa luôn.
+          // Cookie (cf_clearance) nằm ở file khác nên vẫn được giữ.
+          ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'Default/History', 'Default/History-journal'].map(
+            (f) => fs.rm(path.join(PROFILE_DIR, f), { force: true })
           )
         )
       )
@@ -149,11 +151,17 @@ export async function openInBrowser(url, opts = {}) {
     if (first?.d) {
       opts.onStatus?.('downloading');
       const dir = await fs.mkdtemp(path.join(TMP_ROOT, 'drive-uploader-'));
+      const cleanup = () => fs.rm(dir, { recursive: true, force: true });
       const name = first.d.suggestedFilename();
       const filePath = path.join(dir, 'file');
-      await first.d.saveAs(filePath);
-      const failure = await first.d.failure();
-      if (failure) throw new Error('Trình duyệt tải file thất bại: ' + failure);
+      try {
+        await first.d.saveAs(filePath);
+        const failure = await first.d.failure();
+        if (failure) throw new Error('Trình duyệt tải file thất bại: ' + failure);
+      } catch (err) {
+        await cleanup();
+        throw err;
+      }
       return {
         kind: 'file',
         filePath,
@@ -161,7 +169,8 @@ export async function openInBrowser(url, opts = {}) {
         url: first.d.url(),
         contentDisposition: lastHeaders['content-disposition'] || null,
         contentType: lastHeaders['content-type'] || null,
-        cleanup: () => fs.rm(dir, { recursive: true, force: true }) };
+        cleanup,
+      };
     }
 
     // File hiển thị inline (video, ảnh, pdf...) → lấy cookie + User-Agent để tải bằng fetch
